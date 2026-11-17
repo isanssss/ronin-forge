@@ -43,42 +43,64 @@ export function stageShot(ui, name, seed) {
     return;
   }
   if (name === 'battle') {
-    // Stage the frame directly from engine state instead of simulating a fight: a frozen
-    // simulation leaves units mid-lunge and pins decay timers (hit flash, shake) at full
-    // strength forever, which is what made the old frame messy. Here every unit stands in
-    // its formation slot and only the dressing — health, meters, floaters, one cast — is set.
-    const team = seededTeam(seed, 7);
-    const battle = new Battle({ team, stage: 5, endless: false, rng: new Rng(seed * 7717) });
-    battle.layout(); // the constructor already placed everyone; re-assert the slot positions
-    // mid-fight health and meters: bars at varied levels, the Blade's ultimate charged
-    const hpFrac = [0.78, 0.55, 0.88, 0.7, 0.92];
-    const ultVal = [100, 45, 65, 30, 55];
+    // The stage-10 boss fight, staged directly from engine state instead of simulating one:
+    // a frozen simulation leaves units mid-lunge and pins decay timers (hit flash, shake) at
+    // full strength forever. Here the boss wave is spawned for real, everyone stands in their
+    // formation slot, and only the dressing — health, meters, statuses, floaters, the active
+    // cut-in and its element spectacle — is set by hand.
+    const team = seededTeam(seed, 9);
+    const battle = new Battle({ team, stage: 10, endless: false, rng: new Rng(seed * 7717) });
+    battle.spawnWave(3); // the boss wave: the Umbral Shogun leads the front row
+    battle.layout(); // re-assert the slot positions
+    const boss = battle.foes[0];
+    // mid-fight health and meters: the boss bloodied, one hero low, bars at varied levels
+    const hpFrac = [0.82, 0.64, 0.9, 0.35, 0.76];
     battle.players.forEach((u, i) => {
       u.hp = Math.max(1, Math.round(u.maxHp * hpFrac[i]));
-      u.ult = ultVal[i];
     });
-    const foeHpFrac = [0.62, 0.84, 0.41];
-    const foeUltVal = [25, 10, 50];
+    const foeHpFrac = [0.55, 0.7, 0.45, 0.85, 0.6];
+    const foeUltVal = [20, 35, 10, 45, 15];
     battle.foes.forEach((u, i) => {
-      u.hp = Math.max(1, Math.round(u.maxHp * foeHpFrac[i]));
-      u.ult = foeUltVal[i];
+      u.hp = Math.max(1, Math.round(u.maxHp * (foeHpFrac[i] ?? 0.7)));
+      u.ult = foeUltVal[i] ?? 0;
     });
-    // Light action dressing: three damage floaters, each floated clear above its unit's
-    // name plate (a plate's top edge sits ~171px above the unit's feet), and the Medic
-    // mid-cast — castT draws her element glow at her feet. No lunges, no hit flash, no shake.
-    const [frontFoe, , backFoe] = battle.foes;
-    const assassin = battle.players[2];
+    // The Blade has just unleashed: his meter is spent, the cut-in banner is up at full
+    // strength, and his element is still exploding across the enemy line. The Caster's
+    // ultimate is charged instead — her HUD portrait is the one glowing.
+    const blade = battle.players[0];
+    const caster = battle.players[3];
     const medic = battle.players[4];
+    blade.ult = 0;
+    battle.players[1].ult = 40;
+    battle.players[2].ult = 55;
+    caster.ult = 100;
+    medic.ult = 30;
+    battle.cutin = { unit: blade, t: 0.5, dur: 1.5 };
+    battle.ultFx = {
+      element: blade.hero.element,
+      kind: blade.hero.ult.kind,
+      side: 'player',
+      targets: battle.foes.slice(),
+      t: 0.3,
+      dur: 0.9,
+    };
+    // status dressing: the boss burns from the Blade's element, the Guardian fights chilled
+    boss.statuses.push({ kind: 'Burn', t: 2.4, tickT: 0, tickDmg: 12 });
+    battle.players[1].statuses.push({ kind: 'Chill', t: 4, tickT: 0, tickDmg: 0 });
+    // Damage floaters, each floated clear of its unit's name plate and of the cut-in band
+    // (the boss's plate rides ~239px above its feet; a normal plate's top edge ~171px).
+    const backFoe = battle.foes[2];
+    const assassin = battle.players[2];
     battle.floaters.push(
-      { x: frontFoe.x + 6, y: frontFoe.y - 185, text: '-132', color: '#ffd94d', size: 27, t: 0.1, dur: 0.95 },
-      { x: backFoe.x - 6, y: backFoe.y - 182, text: '-89', color: '#ffffff', size: 20, t: 0.25, dur: 0.95 },
-      { x: assassin.x + 6, y: assassin.y - 180, text: '-47', color: '#ffffff', size: 19, t: 0.2, dur: 0.95 },
+      { x: boss.x + 8, y: boss.y - 255, text: '-486', color: '#ffd94d', size: 28, t: 0.1, dur: 0.95 },
+      { x: backFoe.x - 6, y: backFoe.y - 185, text: '-121', color: '#ffffff', size: 20, t: 0.25, dur: 0.95 },
+      { x: assassin.x + 6, y: assassin.y - 182, text: '-58', color: '#ffffff', size: 19, t: 0.2, dur: 0.95 },
     );
     medic.castT = 0.25;
     battle.banner = null;
-    battle.cutin = null;
+    battle.shake = 0;
     ui.battle = battle;
-    ui.battleStage = 5;
+    ui.battleStage = 10;
     ui.screen = 'battle';
     return;
   }

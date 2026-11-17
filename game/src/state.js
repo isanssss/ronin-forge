@@ -3,8 +3,10 @@
 // so they serialise as-is). Every mutation is followed by save() from the UI layer.
 
 import { ECONOMY } from './config.js';
+import { PASSIVES } from './data.js';
 import { Rng } from './random.js';
 import { generateHero, heroKey } from './heroes.js';
+import { emptyGear, gearById } from './gear.js';
 
 const SAVE_KEY = 'ronin-forge-save-v1';
 
@@ -17,6 +19,7 @@ export class GameState {
     this.cleared = 0; // highest stage cleared, 0..10
     this.endlessBest = 0; // best endless wave reached
     this.seedCounter = 1;
+    this.inventory = []; // unequipped gear item ids, dropped by cleared stages
   }
 
   /** Load the saved game, or start a fresh one (with its three starter heroes) if none parses. */
@@ -28,6 +31,12 @@ export class GameState {
         if (parsed && Array.isArray(parsed.roster) && typeof parsed.gems === 'number') {
           const state = new GameState();
           Object.assign(state, parsed);
+          if (!Array.isArray(state.inventory)) state.inventory = [];
+          // saves from before passives and gear: backfill both, deterministically by seed
+          for (const hero of state.roster) {
+            if (!hero.passive) hero.passive = { ...new Rng((hero.seed ^ 0x9e37) >>> 0).pick(PASSIVES) };
+            if (!hero.gear) hero.gear = emptyGear();
+          }
           return state;
         }
       }
@@ -146,5 +155,40 @@ export class GameState {
     }
     this.roster.push(rolled);
     return { ok: true, merged: false, hero: rolled, rolled };
+  }
+
+  // --- gear ------------------------------------------------------------------------------------------
+
+  /** True if a gear id is owned anywhere: in the inventory or on a hero's back. */
+  ownsGear(itemId) {
+    if (this.inventory.includes(itemId)) return true;
+    return this.roster.some((h) => h.gear && Object.values(h.gear).includes(itemId));
+  }
+
+  /**
+   * Equip an inventory piece onto a hero's slot. Whatever the hero already wore there goes
+   * back to the inventory. Returns the piece that came off, or null.
+   */
+  equipGear(heroId, itemId) {
+    const hero = this.heroById(heroId);
+    const item = gearById(itemId);
+    const at = this.inventory.indexOf(itemId);
+    if (!hero || !item || at < 0) return null;
+    if (!hero.gear) hero.gear = emptyGear();
+    this.inventory.splice(at, 1);
+    const previous = hero.gear[item.slot] || null;
+    hero.gear[item.slot] = itemId;
+    if (previous) this.inventory.push(previous);
+    return gearById(previous);
+  }
+
+  /** Take a hero's piece in one slot back into the inventory. Returns the piece, or null. */
+  unequipGear(heroId, slot) {
+    const hero = this.heroById(heroId);
+    if (!hero || !hero.gear || !hero.gear[slot]) return null;
+    const itemId = hero.gear[slot];
+    hero.gear[slot] = null;
+    this.inventory.push(itemId);
+    return gearById(itemId);
   }
 }

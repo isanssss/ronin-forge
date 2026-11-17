@@ -7,8 +7,9 @@
 import { BATTLE } from './config.js';
 import {
   BOSS_NAMES, CLASSES, CLASS_LIST, ELEMENTS, ELEMENT_LIST, EPITHETS, FIRST_NAMES,
-  RARITIES, RARITY_LIST, SHADOW_EPITHETS, SHADOW_FIRST,
+  PASSIVES, RARITIES, RARITY_LIST, SHADOW_EPITHETS, SHADOW_FIRST,
 } from './data.js';
+import { emptyGear, gearBonuses } from './gear.js';
 
 const SKIN_TONES = ['#f2c79b', '#e0ac7e', '#c68863', '#8d5a3b', '#f7d7b0'];
 const HAIR_COLORS = ['#2b2b3a', '#5a3a22', '#8a8f98', '#b54434', '#3a5a8c', '#e8e3d5', '#4d7c4d'];
@@ -45,6 +46,8 @@ export function generateHero(rng, opts = {}) {
     xp: 0,
     skill,
     ult: { ...CLASSES[cls].ult },
+    passive: { ...rng.pick(PASSIVES) },
+    gear: emptyGear(),
     shadow,
     boss,
     jitter: {
@@ -82,7 +85,7 @@ export function heroKey(hero) {
   return hero.first;
 }
 
-/** Derived combat stats: class base x rarity x level growth x the hero's own jitter. */
+/** Derived combat stats: class base x rarity x level growth x jitter, plus worn gear. */
 export function heroStats(hero) {
   const base = CLASSES[hero.cls].base;
   const mult = RARITIES[hero.rarity].mult * (1 + BATTLE.levelStatGrowth * (hero.level - 1));
@@ -97,6 +100,11 @@ export function heroStats(hero) {
     stats.atk = Math.round(stats.atk * 1.3);
     stats.def = Math.round(stats.def * 1.25);
   }
+  const gear = gearBonuses(hero);
+  stats.maxHp += gear.hp;
+  stats.atk += gear.atk;
+  stats.def += gear.def;
+  stats.spd = Math.round((stats.spd + gear.spd) * 10) / 10;
   return stats;
 }
 

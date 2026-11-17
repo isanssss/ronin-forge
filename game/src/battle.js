@@ -7,7 +7,11 @@
 import {
   BATTLE, endlessGemReward, endlessXpReward, stageGemReward, stageXpReward,
 } from './config.js';
-import { BOSS_NAMES, CLASSES, ELEMENTS, ENDLESS_BOSS_NAME, elementMultiplier } from './data.js';
+import {
+  BOSS_NAMES, CLASSES, ELEMENT_STATUS, ENDLESS_BOSS_NAME, STAGE_MODIFIERS, STATUS_EFFECTS,
+  biomeForStage, elementMultiplier,
+} from './data.js';
+import { GEAR_ITEMS } from './gear.js';
 import { gainXp, generateHero, heroStats } from './heroes.js';
 
 export class Battle {
@@ -34,6 +38,11 @@ export class Battle {
       player: { atkAmt: 0, atkTurns: 0, defAmt: 0, defTurns: 0 },
       enemy: { atkAmt: 0, atkTurns: 0, defAmt: 0, defTurns: 0 },
     };
+    // the stage's omen (stages 6-10) and the biome it is fought in
+    this.modifier = endless ? null : (STAGE_MODIFIERS[stage] || null);
+    this.biome = biomeForStage(stage, endless);
+    this.ultFx = null; // the element spectacle of the most recent ultimate, aged by update()
+    this.auraT = 0; // Lantern Aura mend timer
     this.units = team.map(({ hero, row }, i) => this.makeUnit(hero, 'player', row, i, 1));
     this.spawnWave(1);
     this.layout();
@@ -41,7 +50,7 @@ export class Battle {
 
   makeUnit(hero, side, row, slot, scale) {
     const s = heroStats(hero);
-    return {
+    const unit = {
       hero,
       side,
       row,
@@ -51,10 +60,13 @@ export class Battle {
       atk: s.atk * scale,
       def: s.def * scale,
       spd: s.spd,
-      gauge: this.rng.range(0, 260),
+      // Swift Start: the passive opens the fight already halfway to acting
+      gauge: hero.passive && hero.passive.id === 'swift' ? BATTLE.atbMax / 2 : this.rng.range(0, 260),
       ult: 0,
       cd: this.rng.int(0, 1),
       alive: true,
+      statuses: [], // [{ kind, t, tickT, tickDmg }] — at most one per kind
+      secondWindUsed: false,
       flashT: 0,
       lungeT: 0,
       castT: 0,
@@ -62,6 +74,10 @@ export class Battle {
       x: 0,
       y: 0,
     };
+    if (side === 'enemy' && this.modifier && this.modifier.enemySpdMult) {
+      unit.spd *= this.modifier.enemySpdMult;
+    }
+    return unit;
   }
 
   // --- composition -------------------------------------------------------------------------
@@ -171,7 +187,11 @@ export class Battle {
 
   effAtk(unit) {
     const buff = this.sideBuffs[unit.side];
-    return unit.atk * (buff.atkTurns > 0 ? 1 + buff.atkAmt : 1);
+    let atk = unit.atk * (buff.atkTurns > 0 ? 1 + buff.atkAmt : 1);
+    if (unit.side === 'enemy' && this.modifier && this.modifier.enemyAtkMult) {
+      atk *= this.modifier.enemyAtkMult;
+    }
+    return atk;
   }
 
   effDef(unit) {
@@ -203,28 +223,172 @@ export class Battle {
   dealDamage(source, target, power, opts = {}) {
     if (!target || !target.alive) return 0;
     const raw = this.effAtk(source) * power;
-    const mitigated = raw * (100 / (100 + this.effDef(target)));
+    let mitigated = raw * (100 / (100 + this.effDef(target)));
+    // a stage omen can empower one element in the player's hands
+    if (this.modifier && this.modifier.elementBoost && source.side === 'player'
+      && source.hero.element === this.modifier.elementBoost.element) {
+      mitigated *= this.modifier.elementBoost.mult;
+    }
     const element = opts.noElement ? 1 : elementMultiplier(source.hero.element, target.hero.element);
     const variance = this.rng.range(BATTLE.varianceLo, BATTLE.varianceHi);
-    const crit = !opts.noCrit && this.rng.chance(BATTLE.critChance);
-    let dmg = Math.max(1, Math.round(mitigated * element * variance * (crit ? BATTLE.critMult : 1)));
+    const critChance = BATTLE.critChance + (source.hero.passive && source.hero.passive.id === 'focus' ? 0.12 : 0);
+    const crit = !opts.noCrit && this.rng.chance(critChance);
+    let dmg = mitigated * element * variance * (crit ? BATTLE.critMult : 1);
+    // passives that shape the hit itself
+    if (source.hero.passive && source.hero.passive.id === 'executioner' && target.hp / target.maxHp < 0.35) dmg *= 1.3;
+    if (target.hero.passive && target.hero.passive.id === 'ironskin') dmg *= 0.88;
+    dmg = Math.max(1, Math.round(dmg));
     target.hp -= dmg;
     target.flashT = 0.22;
     // Taking hits charges the ultimate — but enemies charge at half rate, or a focused
-    // shadow unit would answer every player ultimate with one of its own.
-    const meterRate = target.side === 'enemy' ? 0.5 : 1;
+    // shadow unit would answer every player ultimate with one of its own. Stage omens
+    // can hasten or slow the charge for everyone, or for the player alone.
+    let meterRate = target.side === 'enemy' ? 0.5 : 1;
+    if (this.modifier && this.modifier.ultRateAll) meterRate *= this.modifier.ultRateAll;
+    if (target.side === 'player' && this.modifier && this.modifier.ultRatePlayer) meterRate *= this.modifier.ultRatePlayer;
     target.ult = Math.min(BATTLE.ultMax, target.ult + Math.min(30, (dmg / target.maxHp) * 150) * meterRate);
     this.addFloater(target, `-${dmg}`, crit ? '#ffd94d' : '#ffffff', crit ? 26 : 20);
     this.events.push({ type: crit ? 'crit' : 'hit', source, target, dmg });
     if (crit) this.shake = Math.max(this.shake, 3.5);
+    // Second Wind: once per battle the passive refuses a killing blow
+    if (target.hp <= 0 && target.hero.passive && target.hero.passive.id === 'secondwind' && !target.secondWindUsed) {
+      target.secondWindUsed = true;
+      target.hp = Math.round(target.maxHp * 0.3);
+      this.addFloater(target, 'SECOND WIND!', '#ffd94d', 21);
+      this.events.push({ type: 'secondwind', unit: target });
+    }
     if (target.hp <= 0) {
       target.hp = 0;
       target.alive = false;
       target.deathT = 0.0001;
+      target.statuses = [];
       this.events.push({ type: 'death', unit: target });
       if (target.hero.boss) this.shake = Math.max(this.shake, 8);
     }
+    // Crimson Siphon drinks from every wound it opens
+    if (source.alive && source.hero.passive && source.hero.passive.id === 'lifesteal') {
+      const healed = Math.min(Math.floor(dmg * 0.15), source.maxHp - source.hp);
+      if (healed >= 3) {
+        source.hp += healed;
+        this.addFloater(source, `+${healed}`, '#ff9a86', 13);
+      }
+    }
+    // Thorn Mantle answers a surviving wearer's attacker — raw, and it can kill
+    if (target.alive && target.hero.passive && target.hero.passive.id === 'thorns' && source.alive && source !== target) {
+      const reflected = Math.max(1, Math.round(dmg * 0.2));
+      source.hp -= reflected;
+      source.flashT = Math.max(source.flashT, 0.15);
+      this.addFloater(source, `-${reflected}`, '#d8b36a', 14);
+      if (source.hp <= 0) {
+        source.hp = 0;
+        source.alive = false;
+        source.deathT = 0.0001;
+        source.statuses = [];
+        this.events.push({ type: 'death', unit: source });
+      }
+    }
+    // the attacker's element lingers on the wounded — skills always, basics sometimes
+    if (target.alive && !opts.noStatus) this.tryApplyStatus(source, target, Boolean(opts.fromSkill));
     return dmg;
+  }
+
+  // --- status effects --------------------------------------------------------------------------------
+
+  /** Roll the attacker's element status onto a target (see ELEMENT_STATUS for the odds). */
+  tryApplyStatus(source, target, fromSkill) {
+    const mapping = ELEMENT_STATUS[source.hero.element];
+    if (!mapping) return;
+    const chance = fromSkill ? mapping.skillChance : mapping.basicChance;
+    if (!this.rng.chance(chance)) return;
+    this.applyStatus(source, target, mapping.kind);
+  }
+
+  /** Attach (or refresh) one status on a target, announcing it with a floater. */
+  applyStatus(source, target, kind) {
+    const def = STATUS_EFFECTS[kind];
+    let entry = target.statuses.find((s) => s.kind === kind);
+    if (!entry) {
+      entry = { kind, t: 0, tickT: 0, tickDmg: 0 };
+      target.statuses.push(entry);
+    }
+    entry.t = def.duration;
+    entry.tickT = 0;
+    if (def.tickDamage) {
+      entry.tickDmg = Math.max(entry.tickDmg, Math.max(1, Math.round(this.effAtk(source) * def.tickDamage)));
+    }
+    this.addFloater(target, def.applyText, def.color, 16);
+    this.events.push({ type: 'status', unit: target, kind });
+  }
+
+  /** How fast a unit's action gauge fills right now: Chill and Root drag on it. */
+  gaugeRate(unit) {
+    let rate = 1;
+    for (const s of unit.statuses) {
+      const def = STATUS_EFFECTS[s.kind];
+      if (def.gaugeRate) rate = Math.min(rate, def.gaugeRate);
+    }
+    return rate;
+  }
+
+  /** If the unit is Stunned, eat the status and its action with it. */
+  consumeStun(unit) {
+    const idx = unit.statuses.findIndex((s) => s.kind === 'Stun');
+    if (idx < 0) return false;
+    unit.statuses.splice(idx, 1);
+    return true;
+  }
+
+  /** Age every status: damage-over-time ticks land, expiries announce themselves. */
+  processStatuses(dt) {
+    for (const unit of this.units) {
+      if (!unit.alive || unit.statuses.length === 0) continue;
+      for (const s of [...unit.statuses]) {
+        const def = STATUS_EFFECTS[s.kind];
+        s.t -= dt;
+        if (def.tickDamage) {
+          s.tickT += dt;
+          if (s.tickT >= 1 && s.t > 0) {
+            s.tickT -= 1;
+            unit.hp -= s.tickDmg;
+            unit.flashT = Math.max(unit.flashT, 0.12);
+            this.addFloater(unit, `-${s.tickDmg}`, def.color, 15);
+            this.events.push({ type: 'dot', unit, kind: s.kind, dmg: s.tickDmg });
+            if (unit.hp <= 0) {
+              unit.hp = 0;
+              unit.alive = false;
+              unit.deathT = 0.0001;
+              unit.statuses = [];
+              this.events.push({ type: 'death', unit });
+              break;
+            }
+          }
+        }
+        if (unit.alive && s.t <= 0) {
+          unit.statuses = unit.statuses.filter((x) => x !== s);
+          if (def.expireText) this.addFloater(unit, def.expireText, '#cbbfa3', 13);
+        }
+      }
+    }
+    if (this.state === 'fighting') this.checkEnd();
+  }
+
+  /** Lantern Aura: every few seconds, a side holding the passive mends its wounded. */
+  processAura(dt) {
+    this.auraT += dt;
+    if (this.auraT < 3) return;
+    this.auraT -= 3;
+    for (const side of ['player', 'enemy']) {
+      const holders = this.units.some((u) => u.side === side && u.alive && u.hero.passive && u.hero.passive.id === 'aura');
+      if (!holders) continue;
+      for (const ally of this.alliesOf({ side })) {
+        const amount = Math.floor(ally.maxHp * 0.02);
+        const healed = Math.min(amount, ally.maxHp - ally.hp);
+        if (healed >= 4) {
+          ally.hp += healed;
+          this.addFloater(ally, `+${healed}`, '#8fe3a8', 12);
+        }
+      }
+    }
   }
 
   dealHeal(source, target, power) {
@@ -255,11 +419,23 @@ export class Battle {
   useSkill(unit, skill, viaUlt) {
     const kind = skill.kind;
     unit.castT = 0.35;
+    if (viaUlt) {
+      // the spectacle render.js plays over the field: element, and who it washes over
+      const offensive = kind === 'damage' || kind === 'nuke' || kind === 'aoe';
+      this.ultFx = {
+        element: unit.hero.element,
+        kind,
+        side: unit.side,
+        targets: (offensive ? this.foesOf(unit) : this.alliesOf(unit)).slice(),
+        t: 0,
+        dur: 0.9,
+      };
+    }
     if (kind === 'damage' || kind === 'nuke') {
       const target = this.pickTarget(unit);
-      if (target) this.dealDamage(unit, target, skill.power);
+      if (target) this.dealDamage(unit, target, skill.power, { fromSkill: true });
     } else if (kind === 'aoe') {
-      for (const foe of this.foesOf(unit)) this.dealDamage(unit, foe, skill.power);
+      for (const foe of this.foesOf(unit)) this.dealDamage(unit, foe, skill.power, { fromSkill: true });
     } else if (kind === 'heal') {
       this.dealHeal(unit, this.weakestAlly(unit), skill.power);
     } else if (kind === 'healAll') {
@@ -295,7 +471,9 @@ export class Battle {
 
     if (unit.cd > 0) unit.cd -= 1;
     const skill = unit.hero.skill;
-    const actGain = unit.side === 'enemy' ? BATTLE.ultGainOnAct * 0.55 : BATTLE.ultGainOnAct;
+    let actGain = unit.side === 'enemy' ? BATTLE.ultGainOnAct * 0.55 : BATTLE.ultGainOnAct;
+    if (this.modifier && this.modifier.ultRateAll) actGain *= this.modifier.ultRateAll;
+    if (unit.side === 'player' && this.modifier && this.modifier.ultRatePlayer) actGain *= this.modifier.ultRatePlayer;
     if (unit.cd <= 0 && this.skillWorthUsing(unit, skill)) {
       unit.cd = skill.cooldown;
       this.useSkill(unit, skill, false);
@@ -369,12 +547,20 @@ export class Battle {
       this.cutin.t += dt;
       if (this.cutin.t > this.cutin.dur) this.cutin = null;
     }
+    if (this.ultFx) {
+      this.ultFx.t += dt;
+      if (this.ultFx.t > this.ultFx.dur) this.ultFx = null;
+    }
     this.shake = Math.max(0, this.shake - dt * 26);
     for (const u of this.units) {
       u.flashT = Math.max(0, u.flashT - dt);
       u.lungeT = Math.max(0, u.lungeT - dt);
       u.castT = Math.max(0, u.castT - dt);
       if (!u.alive && u.deathT > 0) u.deathT += dt;
+    }
+    if (this.state === 'fighting' || this.state === 'between') {
+      this.processStatuses(dt);
+      this.processAura(dt);
     }
     if (this.state === 'between') {
       this.betweenT -= dt;
@@ -387,7 +573,7 @@ export class Battle {
     if (this.state !== 'fighting') return;
 
     for (const u of this.units) {
-      if (u.alive) u.gauge += u.spd * BATTLE.atbPerSpd * dt;
+      if (u.alive) u.gauge += u.spd * BATTLE.atbPerSpd * dt * this.gaugeRate(u);
     }
     // act in speed order among the ready, one action each per pass
     const ready = this.units
@@ -396,6 +582,11 @@ export class Battle {
     for (const unit of ready) {
       if (!unit.alive || this.state !== 'fighting') continue;
       unit.gauge -= BATTLE.atbMax;
+      // Stun eats the action whole: the gauge is spent, the moment is lost
+      if (this.consumeStun(unit)) {
+        this.addFloater(unit, 'STUNNED!', '#ffd54f', 17);
+        continue;
+      }
       this.takeAction(unit);
       if (this.checkEnd()) break;
     }
@@ -450,6 +641,10 @@ export class Battle {
       xpGains.push({ hero: unit.hero, xp: amount, levels, survived: unit.alive });
       if (levels > 0) this.events.push({ type: 'levelup', unit });
     }
+    // cleared stages sometimes yield gear; the UI decides keep vs salvage (duplicates)
+    let gear = null;
+    if (!this.endless && won && this.rng.chance(0.45)) gear = this.rng.pick(GEAR_ITEMS).id;
+    if (this.endless && this.wavesCleared >= 5 && this.rng.chance(0.4)) gear = this.rng.pick(GEAR_ITEMS).id;
     this.rewards = {
       won,
       endless: this.endless,
@@ -457,6 +652,7 @@ export class Battle {
       waves: this.wavesCleared,
       gems,
       xpGains,
+      gear,
     };
   }
 }

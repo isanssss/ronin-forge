@@ -140,4 +140,110 @@ export const STAGE_TIPS = [
   'Ultimates charge as heroes act and take hits. Save them for the boss wave.',
   'A duplicate summon is not wasted: it raises the hero you own by a level.',
   'Medics and Casters strike from the back row, safe from most blades.',
+  'Every element leaves its mark: Fire burns, Water chills, Lightning stuns, Earth roots, Wind poisons.',
+  'Each hero carries a passive trait — check the card before you build the team.',
+  'Stages can drop gear. Equip it in Formation; a duplicate piece salvages into gems.',
 ];
+
+/**
+ * Status effects. Damaging hits carry the attacker's element with them: skills apply their
+ * element's effect outright (Lightning's Stun is a chance, being stronger), basic attacks
+ * only sometimes. Burn and Poison tick once a second for a stored slice of the applier's
+ * attack; Chill and Root slow the action gauge instead of hurting; Stun eats the victim's
+ * next action whole. One instance per kind per unit — reapplying refreshes it.
+ */
+export const STATUS_EFFECTS = {
+  Burn: {
+    color: '#ff7043', glyph: 'B', duration: 3, tickDamage: 0.14,
+    applyText: 'BURNED!', desc: 'Burns for damage every second.',
+  },
+  Poison: {
+    color: '#a5d64f', glyph: 'P', duration: 4, tickDamage: 0.11,
+    applyText: 'POISONED!', desc: 'Poison seeps in every second.',
+  },
+  Chill: {
+    color: '#7fd4ff', glyph: 'C', duration: 5, gaugeRate: 0.55,
+    applyText: 'CHILLED!', desc: 'The action gauge fills 45% slower.',
+  },
+  Root: {
+    color: '#c98d4b', glyph: 'R', duration: 4, gaugeRate: 0.35,
+    applyText: 'ROOTED!', expireText: 'ROOTS BREAK', desc: 'Roots crawl: the action gauge fills 65% slower.',
+  },
+  Stun: {
+    color: '#ffd54f', glyph: 'S', duration: 6,
+    applyText: 'STUNNED!', expireText: 'STUN PASSED', desc: 'Stunned: the next action is lost.',
+  },
+};
+
+/** Which status each element inflicts, and how reliably: skill hits vs basic attacks. */
+export const ELEMENT_STATUS = {
+  Fire: { kind: 'Burn', skillChance: 1, basicChance: 0.15 },
+  Water: { kind: 'Chill', skillChance: 1, basicChance: 0.15 },
+  Lightning: { kind: 'Stun', skillChance: 0.45, basicChance: 0.15 },
+  Earth: { kind: 'Root', skillChance: 1, basicChance: 0.15 },
+  Wind: { kind: 'Poison', skillChance: 1, basicChance: 0.15 },
+};
+
+/**
+ * Passive traits: every generated hero rolls exactly one. The battle engine reads the id;
+ * the name and description are for the hero card. Values live in battle.js / heroes.js.
+ */
+export const PASSIVES = [
+  { id: 'lifesteal', name: 'Crimson Siphon', desc: 'Heals for 15% of the damage it deals.' },
+  { id: 'thorns', name: 'Thorn Mantle', desc: 'Reflects 20% of damage taken back at the attacker.' },
+  { id: 'swift', name: 'Swift Start', desc: 'Enters battle with the action gauge half full.' },
+  { id: 'ironskin', name: 'Iron Skin', desc: 'Takes 12% less damage from every hit.' },
+  { id: 'focus', name: 'Still Mind', desc: 'Critical hits are 12% more likely.' },
+  { id: 'aura', name: 'Lantern Aura', desc: 'Allies mend 2% of their health every few seconds.' },
+  { id: 'executioner', name: 'Executioner', desc: 'Deals 30% more damage to foes under 35% health.' },
+  { id: 'secondwind', name: 'Second Wind', desc: 'Once per battle, refuses death and fights on at 30% health.' },
+];
+
+/**
+ * Stage omens: from stage 6 the road itself fights. elementBoost empowers the player's
+ * heroes of one element; ultRateAll slows (or hastens) every ultimate's charge;
+ * ultRatePlayer touches only the player's; enemySpdMult / enemyAtkMult strengthen the clan.
+ */
+export const STAGE_MODIFIERS = {
+  6: {
+    id: 'ember', name: 'Ember Night', short: 'Fire heroes +25% damage',
+    desc: 'Ember Night: your Fire heroes deal +25% damage.',
+    elementBoost: { element: 'Fire', mult: 1.25 },
+  },
+  7: {
+    id: 'thinair', name: 'Thin Air', short: 'Ultimates charge 20% slower',
+    desc: 'Thin Air: every ultimate charges 20% slower.',
+    ultRateAll: 0.8,
+  },
+  8: {
+    id: 'surge', name: 'Shadow Surge', short: 'Enemies +10% speed',
+    desc: 'Shadow Surge: the shadow clan is +10% faster.',
+    enemySpdMult: 1.1,
+  },
+  9: {
+    id: 'tide', name: 'High Tide', short: 'Water heroes +25% damage',
+    desc: 'High Tide: your Water heroes deal +25% damage.',
+    elementBoost: { element: 'Water', mult: 1.25 },
+  },
+  10: {
+    id: 'umbral', name: 'Umbral Eclipse', short: 'Foes +10% ATK · your ults +20%',
+    desc: 'Umbral Eclipse: the clan hits +10% harder, but your ultimates charge 20% faster.',
+    enemyAtkMult: 1.1, ultRatePlayer: 1.2,
+  },
+};
+
+/** Battlefield biomes: the road changes its face every two stages; the rift has none. */
+export const STAGE_BIOMES = {
+  dojo: 'Night Dojo', bamboo: 'Bamboo Grove', ember: 'Ember Shrine',
+  frost: 'Frost Pass', court: "Warlord's Court", rift: 'The Rift',
+};
+
+/** Which biome a stage fights in (the endless rift overrides everything). */
+export function biomeForStage(stage, endless = false) {
+  if (endless) return 'rift';
+  if (stage <= 2) return 'dojo';
+  if (stage <= 4) return 'bamboo';
+  if (stage <= 6) return 'ember';
+  if (stage <= 8) return 'frost';
+  return 'court';
+}

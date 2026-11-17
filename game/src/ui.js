@@ -5,11 +5,12 @@
 // keeps layout and behaviour in one place per screen.
 
 import { COLORS, ECONOMY, VIEW } from './config.js';
-import { STAGE_NAMES, STAGE_TIPS } from './data.js';
+import { STAGE_MODIFIERS, STAGE_NAMES, STAGE_TIPS } from './data.js';
 import { Battle } from './battle.js';
 import { GameState } from './state.js';
 import { Rng } from './random.js';
 import { drawHero, generateHero } from './heroes.js';
+import { GEAR_SLOTS, SLOT_LABELS, describeGear, gearById } from './gear.js';
 import {
   FONT_BODY, FONT_DISPLAY, bar, drawBackdrop, drawBattleScene, drawGem, drawHeroCard, panel, roundRectPath, text, textFit,
 } from './render.js';
@@ -131,6 +132,7 @@ export class UI {
     this.resultApplied = false;
     this.endTimer = 0;
     this.screen = 'battle';
+    if (this.battle.modifier) this.showToast(this.battle.modifier.desc);
   }
 
   applyBattleEnd() {
@@ -148,6 +150,20 @@ export class UI {
     } else if (result.won && b.stage > this.S.cleared) {
       this.S.cleared = b.stage;
       result.newClear = true;
+    }
+    // a dropped piece joins the inventory — unless it is already owned anywhere, in
+    // which case it is salvaged into gems on the spot
+    if (result.gear) {
+      const item = gearById(result.gear);
+      if (item) {
+        if (this.S.ownsGear(item.id)) {
+          this.S.gems += item.salvage;
+          result.gearSalvaged = item;
+        } else {
+          this.S.inventory.push(item.id);
+          result.gearFound = item;
+        }
+      }
     }
     this.S.save();
     this.result = result;
@@ -168,7 +184,8 @@ export class UI {
       else if (ev.type === 'skill') this.audio.skill();
       else if (ev.type === 'ult') this.audio.ult();
       else if (ev.type === 'heal') this.audio.heal();
-      else if (ev.type === 'buff') this.audio.buff();
+      else if (ev.type === 'buff' || ev.type === 'status') this.audio.buff();
+      else if (ev.type === 'secondwind') this.audio.levelup();
     }
     this.battle.events.length = 0;
   }
@@ -387,10 +404,17 @@ export class UI {
       });
       text(ctx, `Stage ${stage}`, x + 18, y + 40, { size: 22, weight: 'bold', color: unlocked ? COLORS.parchment : 'rgba(203,191,163,0.4)', font: FONT_DISPLAY });
       textFit(ctx, STAGE_NAMES[i], x + 18, y + 68, w - 36, { size: 16, color: unlocked ? COLORS.parchmentDim : 'rgba(203,191,163,0.35)' });
-      if (boss) text(ctx, '☠ BOSS', x + 18, y + 100, { size: 15, weight: 'bold', color: COLORS.crimson });
-      if (cleared) text(ctx, '✓ Cleared', x + 18, y + 128, { size: 15, weight: 'bold', color: COLORS.jade });
-      else if (!unlocked) text(ctx, 'Locked — clear the stage before', x + 18, y + 128, { size: 13, color: 'rgba(203,191,163,0.4)' });
-      else text(ctx, 'Enemy strength rises…', x + 18, y + 128, { size: 13, color: COLORS.parchmentDim });
+      const modifier = STAGE_MODIFIERS[stage];
+      if (modifier) {
+        text(ctx, `◈ ${modifier.name}`, x + 18, y + 94, { size: 13, weight: 'bold', color: '#ffd94d' });
+        textFit(ctx, modifier.short, x + 18, y + 112, w - 36, { size: 11, color: COLORS.parchmentDim });
+      }
+      const bossY = modifier ? y + 136 : y + 100;
+      const statusY = modifier ? y + 150 : y + 128;
+      if (boss) text(ctx, '☠ BOSS', x + 18, bossY, { size: 15, weight: 'bold', color: COLORS.crimson });
+      if (cleared) text(ctx, '✓ Cleared', x + 18, statusY, { size: 15, weight: 'bold', color: COLORS.jade });
+      else if (!unlocked) text(ctx, 'Locked — clear the stage before', x + 18, statusY, { size: 13, color: 'rgba(203,191,163,0.4)' });
+      else if (!modifier) text(ctx, 'Enemy strength rises…', x + 18, statusY, { size: 13, color: COLORS.parchmentDim });
       if (unlocked) {
         this.buttons.push({ x, y, w, h, disabled: false, action: () => this.startBattle(stage, false) });
       }
@@ -503,7 +527,7 @@ export class UI {
     drawBackdrop(ctx, this.t, { calm: true });
     this.drawTopBar('Formation');
     const S = this.S;
-    text(ctx, `Team ${S.team.length}/${ECONOMY.teamSize} — click a hero to add or remove. Front row (max ${ECONOMY.frontRowMax}) is struck first; back row (max ${ECONOMY.backRowMax}) is sheltered.`, 36, 88, { size: 15, color: COLORS.parchmentDim });
+    text(ctx, `Team ${S.team.length}/${ECONOMY.teamSize} — click a hero to add or remove. Front row (max ${ECONOMY.frontRowMax}) is struck first; back row (max ${ECONOMY.backRowMax}) is sheltered. The three buttons under each hero cycle its gear.`, 36, 88, { size: 15, color: COLORS.parchmentDim });
 
     // formation slots on the left
     const slotFor = (row, idx) => ({ x: row === 'front' ? 210 : 36, y: 128 + idx * 148, w: 148, h: 136 });
@@ -540,11 +564,11 @@ export class UI {
       const col = i % 4;
       const rowI = Math.floor(i / 4);
       const x = 420 + col * 208;
-      const y = 118 + rowI * 196;
+      const y = 118 + rowI * 186;
       const inTeam = S.team.includes(hero.id);
-      drawHeroCard(ctx, hero, x, y, 192, 182, { t: this.t, selected: inTeam });
+      drawHeroCard(ctx, hero, x, y, 192, 166, { t: this.t, selected: inTeam });
       this.buttons.push({
-        x, y, w: 192, h: 182, disabled: false,
+        x, y, w: 192, h: 166, disabled: false,
         action: () => {
           if (inTeam) S.removeFromTeam(hero.id);
           else if (!S.addToTeam(hero.id)) {
@@ -553,6 +577,14 @@ export class UI {
           }
           S.save();
         },
+      });
+      // the gear strip: one small button per slot, cycling what the hero wears there
+      GEAR_SLOTS.forEach((slot, si) => {
+        const equipped = hero.gear ? gearById(hero.gear[slot]) : null;
+        const label = equipped ? `${SLOT_LABELS[slot][0]}: ${equipped.short}` : `+ ${SLOT_LABELS[slot]}`;
+        this.btn(x + si * 65.5, y + 172, 61, 22, label, () => this.cycleGear(hero, slot), {
+          size: 11, edge: equipped ? COLORS.gold : COLORS.panelEdge,
+        });
       });
     });
     if (pages > 1) {
@@ -563,6 +595,39 @@ export class UI {
     this.backButton();
   }
 
+  /**
+   * One click on a hero's gear slot: if the slot is occupied, swap in the first spare piece
+   * of that slot from the inventory (or take the piece off when there is no spare); if it is
+   * empty, put the first spare on. Either way the change is toasted and saved.
+   */
+  cycleGear(hero, slot) {
+    const S = this.S;
+    const equippedId = hero.gear ? hero.gear[slot] : null;
+    const spare = S.inventory.find((id) => {
+      const item = gearById(id);
+      return item && item.slot === slot;
+    });
+    if (equippedId) {
+      if (spare) {
+        S.equipGear(hero.id, spare);
+        const item = gearById(spare);
+        this.showToast(`${item.name} equipped on ${hero.first} — ${describeGear(item)}`);
+      } else {
+        const off = S.unequipGear(hero.id, slot);
+        this.showToast(`${off ? off.name : 'Gear'} removed from ${hero.first}.`);
+      }
+    } else if (spare) {
+      S.equipGear(hero.id, spare);
+      const item = gearById(spare);
+      this.showToast(`${item.name} equipped on ${hero.first} — ${describeGear(item)}`);
+    } else {
+      this.showToast(`No spare ${SLOT_LABELS[slot].toLowerCase()} gear — clear stages to find some.`);
+      return;
+    }
+    S.save();
+    this.audio.click();
+  }
+
   // --- battle -------------------------------------------------------------------------------------------------
 
   drawBattle() {
@@ -570,12 +635,13 @@ export class UI {
     const b = this.battle;
     drawBattleScene(ctx, b, this.t);
 
-    // top bar: where we are
+    // top bar: where we are (and the stage's omen, when it has one)
     panel(ctx, 24, 18, 470, 52, { radius: 12 });
-    const label = b.endless
+    let label = b.endless
       ? `Endless Mode · Wave ${b.wave}`
       : `Stage ${b.stage} — ${STAGE_NAMES[b.stage - 1]} · Wave ${Math.min(b.wave, 3)} of 3`;
-    text(ctx, label, 42, 51, { size: 18, weight: 'bold', color: COLORS.parchment });
+    if (b.modifier) label += ` · ${b.modifier.name}`;
+    textFit(ctx, label, 42, 51, 440, { size: 18, weight: 'bold', color: COLORS.parchment });
     this.btn(1010, 18, 76, 46, this.paused ? '▶' : '❚❚', () => { this.paused = !this.paused; }, { size: 17 });
     this.btn(1096, 18, 76, 46, `${this.speed}×`, () => { this.speed = this.speed === 1 ? 2 : 1; }, { size: 17 });
     this.btn(1182, 18, 82, 46, 'Flee', () => { if (!this.shotMode) { b.flee(); } }, { size: 16, edge: COLORS.crimson });
@@ -662,6 +728,11 @@ export class UI {
     text(ctx, 'Spoils', 372, 240, { size: 20, weight: 'bold', color: COLORS.gold, font: FONT_DISPLAY });
     drawGem(ctx, 386, 276, 13);
     text(ctx, `+${r.gems} gems`, 410, 284, { size: 20, weight: 'bold', color: '#b8f4ff' });
+    if (r.gearFound) {
+      textFit(ctx, `⚙ Found gear: ${r.gearFound.name} (${describeGear(r.gearFound)}) — equip it in Formation`, 372, 312, 556, { size: 14, weight: 'bold', color: '#ffd94d' });
+    } else if (r.gearSalvaged) {
+      textFit(ctx, `⚙ Duplicate ${r.gearSalvaged.name} salvaged: +${r.gearSalvaged.salvage} gems`, 372, 312, 556, { size: 14, weight: 'bold', color: '#ffd94d' });
+    }
     let cy = 330;
     for (const gain of r.xpGains) {
       textFit(ctx, gain.hero.name, 372, cy, 300, { size: 15, color: COLORS.parchment });
